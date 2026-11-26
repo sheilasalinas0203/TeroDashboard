@@ -581,51 +581,114 @@ def curvas_pf():
     P = obtener_planta()
     L = P.lim
     u = P.estado()["ult"] or {"i": 0.0, "rpm": 0.0, "vib": 0.0}
-    vib_act = float(u.get("vib") or 0.0)
     i_act = float(u.get("i") or 0.0)
+    r_act = float(u.get("rpm") or 0.0)
+    vib_act = float(u.get("vib") or 0.0)
 
-    # Curva P-F conceptual (degradación desde inicio P hasta falla funcional F)
     x_pf = list(range(0, 101, 5))
-    y_pf = [round(L["v_a"] * math.exp(0.023 * p), 3) for p in x_pf]
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x_pf, y=y_pf, mode="lines+markers", name="Curva P-F (degradación)",
-                             line={"color": C["tend"], "width": 2.2}))
-    fig.add_hline(y=L["v_a"], line={"dash": "dot", "color": C["lim"]},
-                  annotation_text=f"P · Inicio degradación ({L['v_a']:g} mm/s)", annotation_position="top left")
-    fig.add_hline(y=L["v_h"], line={"dash": "dash", "color": PRIO[2]["color"]},
-                  annotation_text=f"Alarma H · Zona C ({L['v_h']:g} mm/s)", annotation_position="top left")
-    fig.add_hline(y=L["v_hh"], line={"dash": "dash", "color": PRIO[1]["color"]},
-                  annotation_text=f"F · Falla funcional ({L['v_hh']:g} mm/s)", annotation_position="top left")
+    def construir_fig_pf(titulo, unidad, y_pf, val_act, p_ini, p_med, p_fin, inverso=False):
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=x_pf, y=y_pf, mode="lines+markers", name="Curva P-F",
+            line={"color": C["tend"], "width": 2.2}, marker={"size": 5}
+        ))
 
-    # Ubica la condición actual sobre la curva P-F según vibración medida
-    if vib_act <= L["v_a"]:
-        pos_x = 15.0
-    elif vib_act >= L["v_hh"]:
-        pos_x = 95.0
-    else:
-        pos_x = 15.0 + ((vib_act - L["v_a"]) / max(0.01, L["v_hh"] - L["v_a"])) * 80.0
-    fig.add_trace(go.Scatter(x=[pos_x], y=[vib_act], mode="markers", name="Estado actual",
-                             marker={"size": 12, "color": PRIO[1]["color"] if vib_act >= L["v_hh"]
-                                     else PRIO[2]["color"] if vib_act >= L["v_h"] else C["pv"]}))
-    fig.update_layout(height=420, margin={"l": 50, "r": 30, "t": 30, "b": 40},
-                      paper_bgcolor=C["panel"], plot_bgcolor=C["barra"],
-                      xaxis_title="Progreso de degradación en el intervalo P-F [%]",
-                      yaxis_title="Severidad de vibración [mm/s RMS]")
-    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key="graf_pf")
+        # Líneas de referencia P, Alarma y F
+        fig.add_hline(y=p_ini, line={"dash": "dot", "color": C["lim"]},
+                      annotation_text=f"P ({p_ini:g})", annotation_position="top left",
+                      annotation_font={"size": 10})
+        if p_med is not None:
+            fig.add_hline(y=p_med, line={"dash": "dash", "color": PRIO[2]["color"]},
+                          annotation_text=f"H ({p_med:g})", annotation_position="top left",
+                          annotation_font={"size": 10})
+        fig.add_hline(y=p_fin, line={"dash": "dash", "color": PRIO[1]["color"]},
+                      annotation_text=f"F ({p_fin:g})", annotation_position="top left",
+                      annotation_font={"size": 10})
 
+        # Ubicación de la condición actual sobre la curva P-F
+        if not inverso:
+            if val_act <= p_ini:
+                pos_x = 15.0
+                color_pt = C["pv"]
+            elif val_act >= p_fin:
+                pos_x = 95.0
+                color_pt = PRIO[1]["color"]
+            else:
+                pos_x = 15.0 + ((val_act - p_ini) / max(0.01, p_fin - p_ini)) * 80.0
+                color_pt = PRIO[2]["color"] if (p_med and val_act >= p_med) else C["pv"]
+        else:
+            # Para velocidad (caída de RPM por sobrecarga o deslizamiento)
+            if val_act <= 100:  # Motor detenido
+                pos_x = 0.0
+                color_pt = C["tenue"]
+            elif val_act >= p_ini:
+                pos_x = 15.0
+                color_pt = C["pv"]
+            elif val_act <= p_fin:
+                pos_x = 95.0
+                color_pt = PRIO[1]["color"]
+            else:
+                pos_x = 15.0 + ((p_ini - val_act) / max(1.0, p_ini - p_fin)) * 80.0
+                color_pt = PRIO[2]["color"]
+
+        fig.add_trace(go.Scatter(
+            x=[pos_x], y=[val_act], mode="markers", name="Actual",
+            marker={"size": 12, "color": color_pt, "line": {"width": 1.5, "color": "#FFFFFF"}}
+        ))
+
+        fig.update_layout(
+            title={"text": titulo, "font": {"size": 13, "color": C["texto"]}},
+            height=360, showlegend=False,
+            margin={"l": 45, "r": 15, "t": 38, "b": 38},
+            paper_bgcolor=C["panel"], plot_bgcolor=C["barra"],
+            font={"color": C["texto"], "size": 11},
+            xaxis_title="Degradación P-F [%]",
+            yaxis_title=unidad
+        )
+        fig.update_xaxes(gridcolor="#DDDDDD", range=[-5, 105])
+        fig.update_yaxes(gridcolor="#DDDDDD")
+        return fig
+
+    # 1. Curva P-F Corriente (incremento exponencial hacia HH)
+    y_i = [round(L["i_nhi"] * math.exp(0.0045 * p), 2) for p in x_pf]
+    fig_i = construir_fig_pf(
+        "II-101 · Curva P-F Corriente", "Corriente [A]",
+        y_i, i_act, L["i_nhi"], L["i_h"], L["i_hh"], inverso=False
+    )
+
+    # 2. Curva P-F Velocidad (caída de RPM por pérdida de par / deslizamiento)
+    r_falla = max(1200.0, L["r_l"] - 100.0)
+    y_r = [round(L["r_nlo"] - (L["r_nlo"] - r_falla) * ((p / 100.0) ** 1.6), 1) for p in x_pf]
+    fig_r = construir_fig_pf(
+        "SI-101 · Curva P-F Velocidad", "Velocidad [RPM]",
+        y_r, r_act, L["r_nlo"], None, L["r_l"], inverso=True
+    )
+
+    # 3. Curva P-F Vibración (severidad ISO 10816 hasta Zona D)
+    y_v = [round(L["v_a"] * math.exp(0.023 * p), 3) for p in x_pf]
+    fig_v = construir_fig_pf(
+        "VI-101 · Curva P-F Vibración", "Vibración [mm/s]",
+        y_v, vib_act, L["v_a"], L["v_h"], L["v_hh"], inverso=False
+    )
+
+    # Mostrar las 3 gráficas lado a lado
+    c1, c2, c3 = st.columns(3)
+    c1.plotly_chart(fig_i, width="stretch", config={"displayModeBar": False}, key="graf_pf_i")
+    c2.plotly_chart(fig_r, width="stretch", config={"displayModeBar": False}, key="graf_pf_r")
+    c3.plotly_chart(fig_v, width="stretch", config={"displayModeBar": False}, key="graf_pf_v")
+
+    # Tabla resumen inferior
     st.markdown(
         f"<div class='hp-panel'><h4>Rangos operacionales y condición P-F</h4><table class='hp-t'>"
-        f"<tr><td>Corriente actual / Banda normal</td><td>{i_act:.2f} A / {L['i_nlo']:g}–{L['i_nhi']:g} A "
-        f"(H: {L['i_h']:g} A · HH: {L['i_hh']:g} A)</td></tr>"
-        f"<tr><td>Velocidad actual / Banda normal</td><td>{float(u.get('rpm') or 0.0):.0f} RPM / "
-        f"{L['r_nlo']:g}–{L['r_nhi']:g} RPM (L: {L['r_l']:g} RPM)</td></tr>"
-        f"<tr><td>Vibración actual / Umbrales P-F</td><td>{vib_act:.2f} mm/s / "
-        f"P: {L['v_a']:g} · H: {L['v_h']:g} · F: {L['v_hh']:g} mm/s</td></tr>"
+        f"<tr><td><b>Variable</b></td><td><b>Valor actual</b></td><td><b>Banda normal</b></td><td><b>Punto P (Inicio)</b></td><td><b>Punto F (Falla)</b></td></tr>"
+        f"<tr><td>II-101 Corriente</td><td>{i_act:.2f} A</td><td>{L['i_nlo']:g}–{L['i_nhi']:g} A</td><td>{L['i_nhi']:g} A</td><td>{L['i_hh']:g} A (HH)</td></tr>"
+        f"<tr><td>SI-101 Velocidad</td><td>{r_act:.0f} RPM</td><td>{L['r_nlo']:g}–{L['r_nhi']:g} RPM</td><td>{L['r_nlo']:g} RPM</td><td>{L['r_l']:g} RPM (L)</td></tr>"
+        f"<tr><td>VI-101 Vibración</td><td>{vib_act:.2f} mm/s</td><td>0–{L['v_h']:g} mm/s</td><td>{L['v_a']:g} mm/s (A|B)</td><td>{L['v_hh']:g} mm/s (D)</td></tr>"
         f"</table></div>", unsafe_allow_html=True)
 
 
-@st.fragment(run_every=REFRESCO_S)
+
 def nivel_3():
     P = obtener_planta()
     s = P.estado()
